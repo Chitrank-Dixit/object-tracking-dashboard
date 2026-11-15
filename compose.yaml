@@ -1,4 +1,5 @@
 services:
+  # Standard CPU Service (Default / CI / Headless)
   app:
     build:
       context: .
@@ -8,6 +9,31 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - APP_ENV=development
+    ports:
+      - "8501:8501"
+    command: [
+      "uv", "run", "streamlit", "run", "app.py",
+      "--server.port=8501",
+      "--server.address=0.0.0.0",
+      "--server.headless=true"
+    ]
+
+  # Hardware-Accelerated GPU Service (NVIDIA RTX 5060 Ti via WSL2 /dev/dxg)
+  app-gpu:
+    build:
+      context: .
+      dockerfile: Containerfile
+    devices:
+      - /dev/dxg:/dev/dxg
+    volumes:
+      - .:/app:Z
+      - /usr/lib/wsl:/usr/lib/wsl:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - APP_ENV=development
+      - LD_LIBRARY_PATH=/usr/lib/wsl/lib
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     ports:
       - "8501:8501"
     command: [

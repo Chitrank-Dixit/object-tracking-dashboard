@@ -10,6 +10,7 @@ Implements all 25 test scenarios (TC-TR-01 through TC-TR-25) specified in Milest
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,7 +40,7 @@ def test_tc_tr_01_training_config_nominal_local() -> None:
     assert config.epochs == 50
     assert config.batch_size == 16
     assert config.imgsz == 640
-    assert config.device == "cpu"
+    assert config.device == "auto"
     assert config.workers == 2
     assert config.patience == 10
     assert config.optimizer == "auto"
@@ -689,3 +690,85 @@ def test_resolve_dataset_path_directory_containing_data_yaml(tmp_path: Path) -> 
     resolved = resolve_dataset_path(config)
 
     assert resolved == yaml_file.resolve()
+
+
+# ==============================================================================
+# Hardware Device Resolution in Training (TC-TR-26 to TC-TR-28)
+# ==============================================================================
+
+
+@pytest.mark.unit
+def test_tc_tr_26_run_training_device_cuda_resolution(tmp_path: Path, mocker: Any) -> None:
+    """TC-TR-26: Verify run_training resolves and passes cuda:0 to model.train when CUDA available."""
+    mocker.patch(
+        "src.train.resolve_compute_device", return_value=MagicMock(resolved_device="cuda:0")
+    )
+
+    data_file = tmp_path / "data.yaml"
+    data_file.write_text("names: ['obj']\nnc: 1\n", encoding="utf-8")
+
+    project_dir = tmp_path / "runs"
+    weights_dir = project_dir / "cuda_exp" / "weights"
+    weights_dir.mkdir(parents=True)
+    (weights_dir / "best.pt").write_text("dummy", encoding="utf-8")
+
+    config = TrainingConfig(
+        data=str(data_file),
+        device="cuda:0",
+        project=str(project_dir),
+        name="cuda_exp",
+        output_dir=str(tmp_path / "models"),
+    )
+
+    mock_results = MagicMock()
+    mock_results.save_dir = str(project_dir / "cuda_exp")
+
+    mock_model = MagicMock()
+    mock_model.train.return_value = mock_results
+
+    res = run_training(config, model=mock_model)
+    assert res.success is True
+    assert mock_model.train.call_args.kwargs["device"] == "cuda:0"
+
+
+@pytest.mark.unit
+def test_tc_tr_27_run_training_device_auto_resolution_cpu(tmp_path: Path, mocker: Any) -> None:
+    """TC-TR-27: Verify run_training resolves auto to cpu when CUDA is unavailable."""
+    mocker.patch("src.train.resolve_compute_device", return_value=MagicMock(resolved_device="cpu"))
+
+    data_file = tmp_path / "data.yaml"
+    data_file.write_text("names: ['obj']\nnc: 1\n", encoding="utf-8")
+
+    project_dir = tmp_path / "runs"
+    weights_dir = project_dir / "cpu_exp" / "weights"
+    weights_dir.mkdir(parents=True)
+    (weights_dir / "best.pt").write_text("dummy", encoding="utf-8")
+
+    config = TrainingConfig(
+        data=str(data_file),
+        device="auto",
+        project=str(project_dir),
+        name="cpu_exp",
+        output_dir=str(tmp_path / "models"),
+    )
+
+    mock_results = MagicMock()
+    mock_results.save_dir = str(project_dir / "cpu_exp")
+
+    mock_model = MagicMock()
+    mock_model.train.return_value = mock_results
+
+    res = run_training(config, model=mock_model)
+    assert res.success is True
+    assert mock_model.train.call_args.kwargs["device"] == "cpu"
+
+
+@pytest.mark.unit
+def test_tc_tr_28_cli_device_flag_propagation() -> None:
+    """TC-TR-28: Verify CLI parser defaults to auto and respects --device flag."""
+    parser = build_parser()
+    args_default = parser.parse_args(["--data", "data.yaml"])
+    assert args_default.device == "auto"
+
+    args_custom = parser.parse_args(["--data", "data.yaml", "--device", "cuda:0"])
+    assert args_custom.device == "cuda:0"

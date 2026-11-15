@@ -333,6 +333,7 @@ def test_tc_trk_11_detector_config_propagated_to_model(
         conf=0.65,
         iou=0.55,
         classes=[0, 2],
+        device=tracker.resolved_device,
         verbose=False,
     )
 
@@ -556,3 +557,125 @@ def test_default_palette_length() -> None:
     for color in DEFAULT_PALETTE:
         assert len(color) == 3
         assert all(0 <= channel <= 255 for channel in color)
+
+
+# ==============================================================================
+# Hardware Acceleration & Fallback Tests (TC-TRK-19 to TC-TRK-23)
+# ==============================================================================
+
+
+@pytest.mark.unit
+def test_tc_trk_19_model_placement_cuda_nominal(
+    mock_yolo_model: Any,
+    mocker: Any,
+) -> None:
+    """TC-TRK-19: Verify model.to('cuda:0') is invoked when CUDA device is resolved."""
+    mocker.patch(
+        "src.tracker.resolve_compute_device",
+        return_value=MagicMock(
+            resolved_device="cuda:0",
+            is_fallback=False,
+            fallback_reason=None,
+        ),
+    )
+    mock_yolo_model.to = MagicMock()
+
+    tracker = ObjectTracker(config=DetectorConfig(device="cuda:0"), model=mock_yolo_model)
+    assert tracker.resolved_device == "cuda:0"
+    assert tracker.is_fallback is False
+    mock_yolo_model.to.assert_called_with("cuda:0")
+
+
+@pytest.mark.unit
+def test_tc_trk_20_model_placement_failure_tier2_fallback(
+    mock_yolo_model: Any,
+    mocker: Any,
+) -> None:
+    """TC-TRK-20: Verify Tier-2 fallback to CPU if model.to('cuda:0') fails."""
+    mocker.patch(
+        "src.tracker.resolve_compute_device",
+        return_value=MagicMock(
+            resolved_device="cuda:0",
+            is_fallback=False,
+            fallback_reason=None,
+        ),
+    )
+    mock_yolo_model.to = MagicMock(side_effect=[RuntimeError("CUDA out of memory"), None])
+
+    tracker = ObjectTracker(config=DetectorConfig(device="cuda:0"), model=mock_yolo_model)
+    assert tracker.resolved_device == "cpu"
+    assert tracker.is_fallback is True
+    assert "CUDA out of memory" in (tracker.fallback_reason or "")
+    mock_yolo_model.to.assert_called_with("cpu")
+
+
+@pytest.mark.unit
+def test_tc_trk_21_mid_stream_inference_cuda_error_tier3_fallback(
+    sample_synthetic_frame: np.ndarray,
+    mock_yolo_model: Any,
+    mock_yolo_result_factory: Callable[..., Any],
+    mocker: Any,
+) -> None:
+    """TC-TRK-21: Verify Tier-3 fallback from CUDA to CPU during mid-stream inference."""
+    mocker.patch(
+        "src.tracker.resolve_compute_device",
+        return_value=MagicMock(
+            resolved_device="cuda:0",
+            is_fallback=False,
+            fallback_reason=None,
+        ),
+    )
+    mock_yolo_model.to = MagicMock()
+    mock_empty_cache = mocker.patch("src.tracker.empty_cuda_cache")
+
+    success_result = mock_yolo_result_factory()
+    # First call on cuda:0 raises RuntimeError; second call on cpu succeeds
+    mock_yolo_model.track.side_effect = [
+        RuntimeError("CUDA device-side assert triggered"),
+        [success_result],
+    ]
+
+    tracker = ObjectTracker(config=DetectorConfig(device="cuda:0"), model=mock_yolo_model)
+    assert tracker.resolved_device == "cuda:0"
+
+    result = tracker.track_frame(sample_synthetic_frame, frame_index=5)
+    assert isinstance(result, FrameResult)
+    assert tracker.resolved_device == "cpu"
+    assert tracker.is_fallback is True
+    assert "Mid-stream fallback on frame 5" in (tracker.fallback_reason or "")
+    mock_empty_cache.assert_called_once()
+    assert mock_yolo_model.track.call_count == 2
+
+
+@pytest.mark.unit
+def test_tc_trk_22_cpu_inference_error_re_raises(
+    sample_synthetic_frame: np.ndarray,
+    mock_yolo_model: Any,
+    mocker: Any,
+) -> None:
+    """TC-TRK-22: Verify inference exceptions on CPU are not suppressed and re-raised."""
+    mocker.patch(
+        "src.tracker.resolve_compute_device",
+        return_value=MagicMock(
+            resolved_device="cpu",
+            is_fallback=False,
+            fallback_reason=None,
+        ),
+    )
+    mock_yolo_model.track.side_effect = ValueError("Invalid input tensor")
+
+    tracker = ObjectTracker(config=DetectorConfig(device="cpu"), model=mock_yolo_model)
+    with pytest.raises(ValueError, match="Invalid input tensor"):
+        tracker.track_frame(sample_synthetic_frame, frame_index=0)
+
+
+@pytest.mark.unit
+def test_tc_trk_23_reset_flushes_cuda_cache(
+    mock_yolo_model: Any,
+    mocker: Any,
+) -> None:
+    """TC-TRK-23: Verify tracker.reset() calls empty_cuda_cache()."""
+    mock_empty_cache = mocker.patch("src.tracker.empty_cuda_cache")
+    tracker = ObjectTracker(model=mock_yolo_model)
+    tracker.reset()
+    mock_empty_cache.assert_called_once()

@@ -16,6 +16,7 @@ from typing import Any
 
 from ultralytics import YOLO
 
+from src.device import resolve_compute_device
 from src.schemas import TrainingConfig, TrainingResult
 
 logger = logging.getLogger(__name__)
@@ -163,19 +164,22 @@ def run_training(
             training_time_seconds=0.0,
         )
 
-    # 4. Initialize YOLO model
+    # 4. Initialize YOLO model and resolve compute device
     yolo_model = model if model is not None else YOLO(config.model_name)
+    device_res = resolve_compute_device(config.device)
+    resolved_device = device_res.resolved_device
 
     start_time = time.perf_counter()
 
     try:
         logger.info(
-            "Starting fine-tuning: %s on %s for %d epochs (batch=%d, imgsz=%d, device=%s)",
+            "Starting fine-tuning: %s on %s for %d epochs (batch=%d, imgsz=%d, device=%s resolved from %s)",
             config.model_name,
             dataset_path,
             config.epochs,
             config.batch_size,
             config.imgsz,
+            resolved_device,
             config.device,
         )
 
@@ -184,7 +188,7 @@ def run_training(
             epochs=config.epochs,
             batch=config.batch_size,
             imgsz=config.imgsz,
-            device=config.device,
+            device=resolved_device,
             workers=config.workers,
             patience=config.patience,
             optimizer=config.optimizer,
@@ -312,8 +316,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device",
         dest="device",
-        default="cpu",
-        help="Compute target device ('cpu', '0', 'cuda')",
+        default="auto",
+        help="Compute target device ('auto', 'cpu', '0', 'cuda') (default: auto)",
     )
     parser.add_argument(
         "--workers",

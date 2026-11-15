@@ -19,6 +19,61 @@ from pydantic import (
 )
 
 
+def validate_device_string(v: str) -> str:
+    """Validate compute device identifier syntax."""
+    cleaned = v.strip().lower()
+    if not cleaned:
+        raise ValueError("device cannot be an empty or whitespace string")
+    if cleaned in ("auto", "cpu", "cuda"):
+        return cleaned
+    if cleaned.startswith("cuda:"):
+        idx_part = cleaned.split("cuda:")[1]
+        if idx_part.isdigit():
+            return cleaned
+    if cleaned.isdigit():
+        return cleaned
+    raise ValueError(
+        f"Unsupported device string '{v}'. Must be 'auto', 'cpu', 'cuda', "
+        f"'cuda:<index>', or integer index string (e.g. '0')."
+    )
+
+
+class CudaDeviceInfo(BaseModel):
+    """Hardware telemetry contract for NVIDIA CUDA device."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    device_name: str = Field(min_length=1, description="Reported GPU device name")
+    device_index: int = Field(ge=0, description="Device index ordinal")
+    total_memory_mb: float = Field(gt=0.0, description="Total physical VRAM in megabytes")
+    allocated_memory_mb: float = Field(ge=0.0, description="Currently allocated VRAM in megabytes")
+    reserved_memory_mb: float = Field(ge=0.0, description="Driver reserved VRAM in megabytes")
+    free_memory_mb: float = Field(ge=0.0, description="Estimated unallocated VRAM in megabytes")
+    utilization_pct: float = Field(ge=0.0, le=100.0, description="VRAM utilization percentage")
+
+
+class DeviceResolutionResult(BaseModel):
+    """Result contract of device resolution and fallback negotiation."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    requested_device: str = Field(description="Originally requested device preference")
+    resolved_device: str = Field(description="Final compute target ('cuda', 'cuda:0', 'cpu')")
+    device_type: Literal["cuda", "cpu"] = Field(description="High-level compute tier")
+    is_fallback: bool = Field(default=False, description="True if fell back from requested device")
+    fallback_reason: str | None = Field(
+        default=None, description="Diagnostic explanation if fallback occurred"
+    )
+
+
 class DetectorConfig(BaseModel):
     """Configuration contract for YOLO detector and ByteTrack/BoT-SORT tracker."""
 
@@ -53,6 +108,15 @@ class DetectorConfig(BaseModel):
         default="bytetrack.yaml",
         description="Ultralytics tracker configuration file",
     )
+    device: str = Field(
+        default="auto",
+        description="Compute device ('auto', 'cpu', 'cuda', 'cuda:0', '0')",
+    )
+
+    @field_validator("device")
+    @classmethod
+    def validate_device(cls, v: str) -> str:
+        return validate_device_string(v)
 
     @field_validator("model_path")
     @classmethod
@@ -411,9 +475,9 @@ class TrainingConfig(BaseModel):
         description="Input square image resolution in pixels",
     )
     device: str = Field(
-        default="cpu",
+        default="auto",
         min_length=1,
-        description="Compute target device ('cpu', '0', 'cuda')",
+        description="Compute target device ('auto', 'cpu', '0', 'cuda')",
     )
     workers: int = Field(
         default=2,
@@ -476,7 +540,12 @@ class TrainingConfig(BaseModel):
         description="Whether to resume training from the last saved checkpoint",
     )
 
-    @field_validator("model_name", "output_dir", "project", "name", "device", "optimizer")
+    @field_validator("device")
+    @classmethod
+    def validate_training_device(cls, v: str) -> str:
+        return validate_device_string(v)
+
+    @field_validator("model_name", "output_dir", "project", "name", "optimizer")
     @classmethod
     def validate_non_empty_strings(cls, v: str) -> str:
         if not v.strip():
@@ -635,6 +704,15 @@ class DashboardConfig(BaseModel):
     draw_lines: bool = Field(default=True, description="Render tripwire lines")
     draw_zones: bool = Field(default=True, description="Render polygon zones")
     draw_hud: bool = Field(default=True, description="Render HUD summary card")
+    device: str = Field(
+        default="auto",
+        description="Compute device preference ('auto', 'cpu', 'cuda', 'cuda:0', '0')",
+    )
+
+    @field_validator("device")
+    @classmethod
+    def validate_dashboard_device(cls, v: str) -> str:
+        return validate_device_string(v)
 
     @field_validator("model_path", "source_path")
     @classmethod

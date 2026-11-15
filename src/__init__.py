@@ -3,14 +3,23 @@
 from typing import Any
 
 from src.counter import SpatialAnalytics
+from src.device import (
+    empty_cuda_cache,
+    get_cuda_device_name,
+    get_cuda_memory_info,
+    is_cuda_available,
+    resolve_compute_device,
+)
 from src.schemas import (
     DEFAULT_LINES_JSON,
     DEFAULT_ZONES_JSON,
     AnalyticsSummary,
     CountingLine,
     CountingZone,
+    CudaDeviceInfo,
     DashboardConfig,
     DetectorConfig,
+    DeviceResolutionResult,
     FrameResult,
     LineCrossingEvent,
     SpatialAnalyticsConfig,
@@ -41,8 +50,10 @@ __all__ = [
     "AnalyticsSummary",
     "CountingLine",
     "CountingZone",
+    "CudaDeviceInfo",
     "DashboardConfig",
     "DetectorConfig",
+    "DeviceResolutionResult",
     "FrameResult",
     "LineCrossingEvent",
     "ObjectTracker",
@@ -52,5 +63,10 @@ __all__ = [
     "TrainingConfig",
     "TrainingResult",
     "download_roboflow_dataset",
+    "empty_cuda_cache",
+    "get_cuda_device_name",
+    "get_cuda_memory_info",
+    "is_cuda_available",
+    "resolve_compute_device",
     "run_training",
 ]

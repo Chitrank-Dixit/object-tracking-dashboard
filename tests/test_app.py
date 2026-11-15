@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -29,6 +30,7 @@ from app import (
     parse_counting_lines_json,
     parse_counting_zones_json,
     process_single_frame,
+    render_sidebar,
     resolve_video_source,
     run_video_processing_loop,
     scan_available_models,
@@ -647,6 +649,7 @@ def test_tc_app_24_dashboard_config_contract_audit() -> None:
     assert config.draw_lines is True
     assert config.draw_zones is True
     assert config.draw_hud is True
+    assert config.device == "auto"
 
     # 2. Frozen immutability
     with pytest.raises(ValidationError):
@@ -675,3 +678,130 @@ def test_tc_app_24_dashboard_config_contract_audit() -> None:
 
     with pytest.raises(ValidationError):
         DashboardConfig(source_path="")
+
+
+# ==============================================================================
+# GPU Device UI & Telemetry Tests (TC-APP-25 to TC-APP-27)
+# ==============================================================================
+
+
+@pytest.mark.unit
+@patch("app.st")
+def test_tc_app_25_sidebar_cuda_device_telemetry_rendered(mock_st: MagicMock, mocker: Any) -> None:
+    """TC-APP-25: Verify sidebar renders GPU success badge and VRAM metrics when CUDA is active."""
+    # Mock selectbox returns
+    # 1st: YOLO weights, 2nd: Tracker, 3rd: Compute Device ("CUDA GPU (NVIDIA RTX 5060 Ti)"), 4th: Video Source
+    mock_st.sidebar.selectbox.side_effect = [
+        "yolov8n.pt",
+        "bytetrack.yaml",
+        "CUDA GPU (NVIDIA RTX 5060 Ti)",
+    ]
+    mock_st.sidebar.radio.return_value = "Sample Video"
+    mock_st.sidebar.slider.side_effect = [0.25, 0.45]
+    mock_st.sidebar.multiselect.return_value = []
+    mock_st.sidebar.text_area.side_effect = ["[]", "[]"]
+    mock_st.sidebar.checkbox.return_value = True
+    mock_st.sidebar.columns.return_value = [MagicMock(), MagicMock()]
+
+    mocker.patch(
+        "app.resolve_compute_device",
+        return_value=MagicMock(
+            resolved_device="cuda:0",
+            device_type="cuda",
+            is_fallback=False,
+            fallback_reason=None,
+        ),
+    )
+    mock_mem = MagicMock(
+        device_name="NVIDIA GeForce RTX 5060 Ti",
+        allocated_memory_mb=1024.0,
+        total_memory_mb=16384.0,
+        utilization_pct=6.25,
+    )
+    mocker.patch("app.get_cuda_memory_info", return_value=mock_mem)
+
+    config, temp_path, err = render_sidebar()
+
+    assert err is None
+    assert config is not None
+    assert config.device == "cuda:0"
+    mock_st.sidebar.success.assert_called_once_with("🟢 **Compute:** CUDA:0")
+    mock_st.sidebar.caption.assert_called_once()
+    mock_st.sidebar.progress.assert_called_once()
+
+
+@pytest.mark.unit
+@patch("app.st")
+def test_tc_app_26_sidebar_cuda_fallback_warning(mock_st: MagicMock, mocker: Any) -> None:
+    """TC-APP-26: Verify sidebar renders warning when device resolution falls back."""
+    mock_st.sidebar.selectbox.side_effect = [
+        "yolov8n.pt",
+        "bytetrack.yaml",
+        "CUDA GPU (NVIDIA RTX 5060 Ti)",
+    ]
+    mock_st.sidebar.radio.return_value = "Sample Video"
+    mock_st.sidebar.slider.side_effect = [0.25, 0.45]
+    mock_st.sidebar.multiselect.return_value = []
+    mock_st.sidebar.text_area.side_effect = ["[]", "[]"]
+    mock_st.sidebar.checkbox.return_value = True
+    mock_st.sidebar.columns.return_value = [MagicMock(), MagicMock()]
+
+    mocker.patch(
+        "app.resolve_compute_device",
+        return_value=MagicMock(
+            resolved_device="cpu",
+            device_type="cpu",
+            is_fallback=True,
+            fallback_reason="Requested device 'cuda:0' is unavailable. Operating on CPU.",
+        ),
+    )
+
+    config, temp_path, err = render_sidebar()
+
+    assert err is None
+    assert config is not None
+    assert config.device == "cuda:0"
+    mock_st.sidebar.info.assert_called_once_with("⚪ **Compute:** CPU Mode")
+    mock_st.sidebar.warning.assert_called_once_with(
+        "⚠️ Requested device 'cuda:0' is unavailable. Operating on CPU."
+    )
+
+
+@pytest.mark.unit
+@patch("app.cv2.VideoCapture")
+@patch("app.ObjectTracker")
+@patch("app.SpatialAnalytics")
+@patch("app.st")
+def test_tc_app_27_processing_loop_calls_empty_cuda_cache(
+    mock_st: MagicMock,
+    mock_spatial_cls: MagicMock,
+    mock_tracker_cls: MagicMock,
+    mock_video_capture: MagicMock,
+    mocker: Any,
+) -> None:
+    """TC-APP-27: Verify empty_cuda_cache is always executed upon video loop exit."""
+    mock_cap = MagicMock()
+    mock_cap.isOpened.return_value = True
+    mock_cap.read.return_value = (False, None)
+    mock_video_capture.return_value = mock_cap
+
+    mock_st.session_state = {"is_running": True}
+    mock_empty_cache = mocker.patch("app.empty_cuda_cache")
+
+    config = DashboardConfig(source_path="data/sample_video.mp4")
+
+    run_video_processing_loop(
+        config=config,
+        temp_path=None,
+        video_placeholder=MagicMock(),
+        metric_cols={
+            "fps": MagicMock(),
+            "latency": MagicMock(),
+            "in": MagicMock(),
+            "out": MagicMock(),
+            "tracks": MagicMock(),
+        },
+        table_placeholder=MagicMock(),
+    )
+
+    mock_empty_cache.assert_called_once()

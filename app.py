@@ -17,6 +17,7 @@ import numpy as np
 import streamlit as st
 
 from src.counter import SpatialAnalytics
+from src.device import empty_cuda_cache, get_cuda_memory_info, resolve_compute_device
 from src.schemas import (
     DEFAULT_LINES_JSON,
     DEFAULT_ZONES_JSON,
@@ -230,6 +231,39 @@ def render_sidebar() -> tuple[DashboardConfig | None, Path | None, str | None]:
 
     tracker_type = st.sidebar.selectbox("Tracker", ["bytetrack.yaml", "botsort.yaml"], index=0)
 
+    # Compute Device Selection & Telemetry
+    device_choices = [
+        "Auto-Detect (GPU if available)",
+        "CUDA GPU (NVIDIA RTX 5060 Ti)",
+        "CPU Only",
+    ]
+    selected_device_choice = st.sidebar.selectbox("Compute Device", device_choices, index=0)
+    if "CUDA GPU" in selected_device_choice:
+        requested_device = "cuda:0"
+    elif "CPU Only" in selected_device_choice:
+        requested_device = "cpu"
+    else:
+        requested_device = "auto"
+
+    dev_res = resolve_compute_device(requested_device)
+    if dev_res.device_type == "cuda":
+        st.sidebar.success(f"🟢 **Compute:** {dev_res.resolved_device.upper()}")
+        mem_info = get_cuda_memory_info(0)
+        if mem_info is not None:
+            st.sidebar.caption(
+                f"**GPU:** {mem_info.device_name}\n\n"
+                f"**VRAM:** {mem_info.allocated_memory_mb:.1f} MB / {mem_info.total_memory_mb / 1024:.1f} GB"
+            )
+            st.sidebar.progress(
+                min(1.0, max(0.0, mem_info.utilization_pct / 100.0)),
+                text=f"VRAM Utilization: {mem_info.utilization_pct:.1f}%",
+            )
+    else:
+        st.sidebar.info("⚪ **Compute:** CPU Mode")
+
+    if dev_res.is_fallback and dev_res.fallback_reason:
+        st.sidebar.warning(f"⚠️ {dev_res.fallback_reason}")
+
     conf_thresh = st.sidebar.slider("Confidence Threshold", 0.05, 1.0, 0.25, 0.05)
     iou_thresh = st.sidebar.slider("IoU Threshold", 0.05, 1.0, 0.45, 0.05)
 
@@ -297,6 +331,7 @@ def render_sidebar() -> tuple[DashboardConfig | None, Path | None, str | None]:
             draw_lines=draw_lines,
             draw_zones=draw_zones,
             draw_hud=draw_hud,
+            device=requested_device,
         )
         return config, temp_path, None
     except Exception as exc:
@@ -365,9 +400,13 @@ def run_video_processing_loop(
         iou_threshold=config.iou_threshold,
         target_classes=config.target_classes,
         tracker_type=config.tracker_type,
+        device=config.device,
     )
     tracker = ObjectTracker(config=detector_config)
     analytics = SpatialAnalytics(lines=config.lines, zones=config.zones)
+
+    if tracker.is_fallback and tracker.fallback_reason:
+        st.sidebar.warning(f"⚠️ {tracker.fallback_reason}")
 
     st.session_state["tracker"] = tracker
     st.session_state["analytics"] = analytics
@@ -409,6 +448,7 @@ def run_video_processing_loop(
             frame_idx += 1
     finally:
         cap.release()
+        empty_cuda_cache()
         if temp_path:
             temp_path.unlink(missing_ok=True)
 

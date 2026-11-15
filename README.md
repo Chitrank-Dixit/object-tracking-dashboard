@@ -7,6 +7,8 @@ A containerized, production-grade computer vision application for real-time obje
 ## Key Features
 
 - **Multi-Object Tracking (MOT)**: State-of-the-art tracking via ByteTrack and BoT-SORT with persistent track IDs across frames and sub-pixel bounding box clamping.
+- **Hardware Acceleration**: Full CUDA GPU acceleration supporting NVIDIA Tensor Cores (tested on **NVIDIA GeForce RTX 5060 Ti 16GB**) via WSL2 DirectX Graphics (`/dev/dxg`) device passthrough.
+- **Three-Tier Graceful Fallback**: Resilient design that automatically detects hardware availability; if CUDA is requested but unavailable, encounters out-of-memory (OOM), or fails mid-stream, execution falls back to CPU without dropping frames or crashing.
 - **Directional Line-Crossing Counting**: Vector cross-product intersection calculation that classifies directional `IN` and `OUT` events per track ID, preventing jitter and duplicate triggers.
 - **Spatial Zone Occupancy**: Real-time point-in-polygon containment analysis reporting live headcounts within designated regions of interest (ROI).
 - **Interactive Streamlit Dashboard**: Live visual overlays (bounding boxes, track IDs, centroid motion trails, line coordinates, zone polygons), metric scorecards, dynamic class filtering, and event tables.
@@ -60,6 +62,7 @@ object-tracking-dashboard/
 ├── src/                        # Core application modules
 │   ├── __init__.py             # Package exports (lazy-loaded CLI bindings)
 │   ├── counter.py              # SpatialAnalytics (cross-product lines & polygon zones)
+│   ├── device.py               # Hardware abstraction & CUDA VRAM telemetry manager
 │   ├── schemas.py              # Pydantic v2 domain schemas & configs
 │   ├── tracker.py              # ObjectTracker (YOLOv8 + ByteTrack wrapper)
 │   └── train.py                # Model fine-tuning & Roboflow ingestion CLI
@@ -116,8 +119,12 @@ The included `Makefile` automatically adapts to native Linux Podman or Windows `
 | Target | Command Executed | Purpose |
 | :--- | :--- | :--- |
 | `make help` | Display help | List all targets with runtime diagnostics |
-| **`make run`** / **`make dev`** | `uv run streamlit run app.py` | **Launch live Streamlit dashboard on port 8501** |
-| `make test` | `uv run pytest -v` | Execute full automated test suite (237 tests) |
+| **`make run`** / **`make dev`** | `uv run streamlit run app.py` | **Launch live Streamlit dashboard (Auto-detects GPU or CPU)** |
+| `make run-gpu` | `uv run streamlit run app.py` (GPU) | Force launch dashboard with CUDA hardware acceleration |
+| `make run-cpu` | `uv run streamlit run app.py` (CPU) | Force launch dashboard in CPU-only mode |
+| `make gpu-info` | `uv run python -m src.device` | Probe and display active GPU & VRAM telemetry report |
+| `make test` | `uv run pytest -v` | Execute full automated test suite (CPU CI safe) |
+| `make test-gpu` | `uv run pytest -v` (GPU) | Execute full automated test suite inside GPU container |
 | `make test-unit` | `uv run pytest -v --tb=short` | Run tests with compact tracebacks |
 | `make test-cov` | `uv run pytest --cov=src` | Run tests with coverage breakdown |
 | `make check` | `ruff check` + `ruff format --check` | Run linter and formatting checks |

@@ -6,6 +6,7 @@ strictly validating outputs into Pydantic v2 FrameResult models.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Generator
@@ -16,7 +17,8 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from src.schemas import DetectorConfig, FrameResult, TrackedObject
+from src.device import empty_cuda_cache, resolve_compute_device
+from src.schemas import DetectorConfig, DeviceResolutionResult, FrameResult, TrackedObject
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,10 @@ class ObjectTracker:
             model: Optional pre-loaded or mocked YOLO instance for offline testing.
         """
         self.config: DetectorConfig = config if config is not None else DetectorConfig()
+        self.resolution: DeviceResolutionResult = resolve_compute_device(self.config.device)
+        self.resolved_device: str = self.resolution.resolved_device
+        self.is_fallback: bool = self.resolution.is_fallback
+        self.fallback_reason: str | None = self.resolution.fallback_reason
 
         if model is not None:
             self.model: Any = model
@@ -58,6 +64,25 @@ class ObjectTracker:
             if model_path.parent and not model_path.parent.exists():
                 model_path.parent.mkdir(parents=True, exist_ok=True)
             self.model = YOLO(self.config.model_path)
+
+        # Tier 2 Model device placement with graceful fallback protection
+        if self.resolved_device != "cpu" and hasattr(self.model, "to"):
+            try:
+                self.model.to(self.resolved_device)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to move model to %s (%s). Falling back to CPU.",
+                    self.resolved_device,
+                    exc,
+                )
+                self.resolved_device = "cpu"
+                self.is_fallback = True
+                self.fallback_reason = (
+                    f"Model placement on {self.resolution.resolved_device} failed: {exc}. "
+                    "Operating on CPU."
+                )
+                with contextlib.suppress(Exception):
+                    self.model.to("cpu")
 
     def _validate_frame(self, frame: Any) -> None:
         """Validate that input frame meets format, dimension, and dtype requirements.
@@ -99,15 +124,42 @@ class ObjectTracker:
         start_time = time.perf_counter()
 
         # Execute tracking with persistence across consecutive frames
-        raw_results = self.model.track(
-            source=frame,
-            persist=True,
-            tracker=self.config.tracker_type,
-            conf=self.config.confidence_threshold,
-            iou=self.config.iou_threshold,
-            classes=self.config.target_classes,
-            verbose=False,
-        )
+        try:
+            raw_results = self.model.track(
+                source=frame,
+                persist=True,
+                tracker=self.config.tracker_type,
+                conf=self.config.confidence_threshold,
+                iou=self.config.iou_threshold,
+                classes=self.config.target_classes,
+                device=self.resolved_device,
+                verbose=False,
+            )
+        except Exception as exc:
+            if self.resolved_device != "cpu":
+                logger.warning(
+                    "Inference failed on %s (%s). Triggering mid-stream fallback to CPU.",
+                    self.resolved_device,
+                    exc,
+                )
+                self.resolved_device = "cpu"
+                self.is_fallback = True
+                self.fallback_reason = (
+                    f"Mid-stream fallback on frame {frame_index}: {exc}. Switched to CPU."
+                )
+                empty_cuda_cache()
+                raw_results = self.model.track(
+                    source=frame,
+                    persist=True,
+                    tracker=self.config.tracker_type,
+                    conf=self.config.confidence_threshold,
+                    iou=self.config.iou_threshold,
+                    classes=self.config.target_classes,
+                    device="cpu",
+                    verbose=False,
+                )
+            else:
+                raise
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -332,10 +384,11 @@ class ObjectTracker:
             cap.release()
 
     def reset(self) -> None:
-        """Reset internal tracker state (Kalman filters and track IDs)."""
+        """Reset internal tracker state (Kalman filters and track IDs) and flush GPU cache."""
         if (
             hasattr(self.model, "predictor")
             and self.model.predictor is not None
             and hasattr(self.model.predictor, "trackers")
         ):
             self.model.predictor.trackers = []
+        empty_cuda_cache()

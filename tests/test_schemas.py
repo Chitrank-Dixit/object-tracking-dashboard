@@ -13,10 +13,14 @@ from src.schemas import (
     AnalyticsSummary,
     CountingLine,
     CountingZone,
+    CudaDeviceInfo,
     DashboardConfig,
     DetectorConfig,
+    DeviceResolutionResult,
     FrameResult,
     TrackedObject,
+    TrainingConfig,
+    validate_device_string,
 )
 
 # ==============================================================================
@@ -34,6 +38,7 @@ def test_tc01_detector_config_nominal_defaults() -> None:
     assert config.iou_threshold == 0.45
     assert config.target_classes is None
     assert config.tracker_type == "bytetrack.yaml"
+    assert config.device == "auto"
 
 
 @pytest.mark.unit
@@ -621,6 +626,7 @@ def test_tc34_dashboard_config_nominal_defaults() -> None:
     assert config.draw_lines is True
     assert config.draw_zones is True
     assert config.draw_hud is True
+    assert config.device == "auto"
 
 
 @pytest.mark.unit
@@ -667,3 +673,183 @@ def test_tc37_dashboard_config_empty_paths_raises(field: str, val: str) -> None:
     assert "cannot be empty or whitespace" in str(exc_info.value) or "string_too_short" in str(
         exc_info.value
     )
+
+
+# ==============================================================================
+# Hardware & Compute Device Schema Tests (TC-38 to TC-45)
+# ==============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw_input", "expected"),
+    [
+        ("auto", "auto"),
+        ("AUTO", "auto"),
+        ("cpu", "cpu"),
+        ("CPU", "cpu"),
+        ("cuda", "cuda"),
+        ("CUDA", "cuda"),
+        ("cuda:0", "cuda:0"),
+        ("CUDA:1", "cuda:1"),
+        ("0", "0"),
+        ("1", "1"),
+        (" 2 ", "2"),
+    ],
+)
+def test_tc38_validate_device_string_valid(raw_input: str, expected: str) -> None:
+    """TC-38: Verify validate_device_string accepts and canonicalizes valid device syntax."""
+    assert validate_device_string(raw_input) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invalid_device",
+    [
+        "",
+        "   ",
+        "\t\n",
+        "metal",
+        "mps",
+        "tpu",
+        "cuda:",
+        "cuda:abc",
+        "cuda:-1",
+        "-1",
+        "device:0",
+    ],
+)
+def test_tc39_validate_device_string_invalid(invalid_device: str) -> None:
+    """TC-39: Verify validate_device_string rejects unsupported device identifiers."""
+    with pytest.raises(ValueError):
+        validate_device_string(invalid_device)
+
+
+@pytest.mark.unit
+def test_tc40_cuda_device_info_contract() -> None:
+    """TC-40: Verify CudaDeviceInfo contract enforcement, frozen immutability, and forbid extra."""
+    info = CudaDeviceInfo(
+        device_name="NVIDIA GeForce RTX 5060 Ti",
+        device_index=0,
+        total_memory_mb=16384.0,
+        allocated_memory_mb=2048.0,
+        reserved_memory_mb=3072.0,
+        free_memory_mb=14336.0,
+        utilization_pct=12.5,
+    )
+    assert info.device_name == "NVIDIA GeForce RTX 5060 Ti"
+    assert info.device_index == 0
+    assert info.total_memory_mb == 16384.0
+    assert info.allocated_memory_mb == 2048.0
+    assert info.reserved_memory_mb == 3072.0
+    assert info.free_memory_mb == 14336.0
+    assert info.utilization_pct == 12.5
+
+    # Frozen immutability
+    with pytest.raises(ValidationError):
+        info.total_memory_mb = 8192.0  # type: ignore[misc]
+
+    # Extra attributes forbidden
+    with pytest.raises(ValidationError):
+        CudaDeviceInfo(
+            device_name="RTX",
+            device_index=0,
+            total_memory_mb=1000.0,
+            allocated_memory_mb=0.0,
+            reserved_memory_mb=0.0,
+            free_memory_mb=1000.0,
+            utilization_pct=0.0,
+            extra_field="disallowed",  # type: ignore[call-arg]
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invalid_kwargs",
+    [
+        {"device_name": ""},
+        {"device_index": -1},
+        {"total_memory_mb": 0.0},
+        {"total_memory_mb": -100.0},
+        {"allocated_memory_mb": -1.0},
+        {"reserved_memory_mb": -1.0},
+        {"free_memory_mb": -1.0},
+        {"utilization_pct": -0.1},
+        {"utilization_pct": 100.1},
+    ],
+)
+def test_tc41_cuda_device_info_invalid_raises(invalid_kwargs: dict[str, object]) -> None:
+    """TC-41: Verify CudaDeviceInfo enforces bounds on memory and utilization fields."""
+    nominal: dict[str, object] = {
+        "device_name": "GPU",
+        "device_index": 0,
+        "total_memory_mb": 1000.0,
+        "allocated_memory_mb": 100.0,
+        "reserved_memory_mb": 200.0,
+        "free_memory_mb": 900.0,
+        "utilization_pct": 10.0,
+    }
+    nominal.update(invalid_kwargs)
+    with pytest.raises(ValidationError):
+        CudaDeviceInfo(**nominal)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_tc42_device_resolution_result_contract() -> None:
+    """TC-42: Verify DeviceResolutionResult contract, literal constraints, and immutability."""
+    res = DeviceResolutionResult(
+        requested_device="auto",
+        resolved_device="cuda:0",
+        device_type="cuda",
+        is_fallback=False,
+        fallback_reason=None,
+    )
+    assert res.requested_device == "auto"
+    assert res.resolved_device == "cuda:0"
+    assert res.device_type == "cuda"
+    assert res.is_fallback is False
+
+    # Invalid device_type
+    with pytest.raises(ValidationError):
+        DeviceResolutionResult(
+            requested_device="auto",
+            resolved_device="tpu:0",
+            device_type="tpu",  # type: ignore[arg-type]
+        )
+
+    # Immutability
+    with pytest.raises(ValidationError):
+        res.is_fallback = True  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_tc43_detector_config_device_validation() -> None:
+    """TC-43: Verify DetectorConfig validates and accepts device string."""
+    cfg = DetectorConfig(device="cuda:0")
+    assert cfg.device == "cuda:0"
+
+    cfg_cpu = DetectorConfig(device="cpu")
+    assert cfg_cpu.device == "cpu"
+
+    with pytest.raises(ValidationError):
+        DetectorConfig(device="invalid_dev")
+
+
+@pytest.mark.unit
+def test_tc44_dashboard_config_device_validation() -> None:
+    """TC-44: Verify DashboardConfig validates and accepts device string."""
+    cfg = DashboardConfig(device="cuda")
+    assert cfg.device == "cuda"
+
+    with pytest.raises(ValidationError):
+        DashboardConfig(device="mps")
+
+
+@pytest.mark.unit
+def test_tc45_training_config_device_validation() -> None:
+    """TC-45: Verify TrainingConfig validates device defaults and values."""
+    cfg = TrainingConfig(data="data/custom.yaml", device="cuda:0")
+    assert cfg.device == "cuda:0"
+
+    cfg_default = TrainingConfig(data="data/custom.yaml")
+    assert cfg_default.device == "auto"
