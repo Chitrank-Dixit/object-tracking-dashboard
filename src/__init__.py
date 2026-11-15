@@ -3,13 +3,6 @@
 from typing import Any
 
 from src.counter import SpatialAnalytics
-from src.device import (
-    empty_cuda_cache,
-    get_cuda_device_name,
-    get_cuda_memory_info,
-    is_cuda_available,
-    resolve_compute_device,
-)
 from src.schemas import (
     DEFAULT_LINES_JSON,
     DEFAULT_ZONES_JSON,
@@ -28,6 +21,21 @@ from src.schemas import (
     TrainingResult,
 )
 from src.tracker import ObjectTracker
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy-load device and training functions to avoid runpy collision."""
+    if name in (
+        "empty_cuda_cache",
+        "get_cuda_device_name",
+        "get_cuda_memory_info",
+        "is_cuda_available",
+        "resolve_compute_device",
+    ):
+        import src.device as _dev
+
+        return getattr(_dev, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def run_training(*args: Any, **kwargs: Any) -> Any:
