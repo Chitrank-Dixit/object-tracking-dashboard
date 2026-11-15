@@ -6,7 +6,6 @@ strictly validating outputs into Pydantic v2 FrameResult models.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import time
 from collections.abc import Generator
@@ -81,8 +80,10 @@ class ObjectTracker:
                     f"Model placement on {self.resolution.resolved_device} failed: {exc}. "
                     "Operating on CPU."
                 )
-                with contextlib.suppress(Exception):
+                try:
                     self.model.to("cpu")
+                except Exception:
+                    pass
 
     def _validate_frame(self, frame: Any) -> None:
         """Validate that input frame meets format, dimension, and dtype requirements.
